@@ -10,10 +10,77 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AzureKeyCredential } from "@azure/core-auth";
-import { DefaultAzureCredential } from "@azure/identity";
+import { AzureCliCredential, DefaultAzureCredential } from "@azure/identity";
 import { VoiceHandler } from "./voiceHandler.js";
+import { NativeVoiceHandler } from "./nativeVoiceHandler.js";
+import { configureLocalAgent, isPromptRoleTestingEnabled } from "./localConfig.js";
+import { AIProjectClient } from "@azure/ai-projects";
+import { FoundryMemory, InterviewMemory, memoryFailure } from "./memoryService.js";
+import { InterviewStore } from "./interviewStore.js";
+import { createHash, randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { createLocalClaimsResolver } from "./localIdentity.js";
+import { loadProjectConfig, projectAccess, projectRole } from "./projectConfig.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+configureLocalAgent(process.env);
+const localOnly = process.env.VOICELIVE_LOCAL_ONLY === "true";
+const promptRoleTesting = isPromptRoleTestingEnabled(process.env);
+const memoryEnabled = localOnly && process.env.VOICELIVE_MEMORY_ENABLED === "true";
+const interviewPath = process.env.VOICELIVE_INTERVIEW_DB || join(process.env.LOCALAPPDATA || join(homedir(), ".local", "share"), "VoiceLiveRequirements", `${createHash("sha256").update(process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT || "").digest("hex").slice(0, 20)}.sqlite`);
+const interviews = memoryEnabled ? new InterviewStore(interviewPath) : null;
+let interviewMemory;
+let resolveLocalClaims;
+const configuredProjects = memoryEnabled ? loadProjectConfig() : [];
+const configuredProjectMap = new Map(configuredProjects.map(project => [project.id, project]));
+
+async function localIdentity() {
+  if (!memoryEnabled) throw new Error("Local memory is not enabled.");
+  if (!resolveLocalClaims) resolveLocalClaims = createLocalClaimsResolver(getCredential());
+  return resolveLocalClaims();
+}
+
+async function localUserId() {
+  return (await localIdentity()).userId;
+}
+
+function authorizeProject(identity, projectId) {
+  const configured = configuredProjectMap.get(projectId);
+  if (configured) {
+    if (!projectAccess(configured, identity)) throw new Error("Project access denied: your Entra groups are not authorized for this project.");
+    interviews.registerConfiguredProject(configured.id, configured.name);
+    interviews.addProjectMember(identity.userId, configured.id);
+    return configured;
+  }
+  interviews.authorize(identity.userId, projectId);
+  return null;
+}
+
+function visibleProjects(identity) {
+  for (const project of configuredProjects) {
+    if (projectAccess(project, identity)) {
+      interviews.registerConfiguredProject(project.id, project.name);
+      interviews.addProjectMember(identity.userId, project.id);
+    }
+  }
+  return interviews.projects(identity.userId)
+    .filter(project => !configuredProjectMap.has(project.id) || projectAccess(configuredProjectMap.get(project.id), identity))
+    .map(project => {
+      const config = configuredProjectMap.get(project.id);
+      if (!config) return { ...project, role: null, roleConfigured: true, roleRequired: false };
+      const role = projectRole(config, identity);
+      const roleTestMode = promptRoleTesting && Boolean(config.requireRole) && !role;
+      return { ...project, role, roleConfigured: Boolean(role), roleRequired: Boolean(config.requireRole), roleTestMode };
+    });
+}
+
+function getInterviewMemory() {
+  if (!interviewMemory) {
+    const client = new AIProjectClient(process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT, getCredential());
+    interviewMemory = new InterviewMemory(new FoundryMemory(client, process.env.AZURE_MEMORY_STORE_NAME || "requirements-memory"), interviews);
+  }
+  return interviewMemory;
+}
 
 // ---------------------------------------------------------------------------
 // Credential
@@ -23,7 +90,10 @@ let _credential = null;
 function getCredential() {
   if (!_credential) {
     const apiKey = process.env.AZURE_VOICELIVE_API_KEY;
-    if (apiKey) {
+    if (localOnly) {
+      _credential = new AzureCliCredential();
+      console.log("[AUTH] Using Azure CLI credential (local only)");
+    } else if (apiKey) {
       _credential = new AzureKeyCredential(apiKey);
       console.log("[AUTH] Using API key credential");
     } else {
@@ -111,6 +181,14 @@ expressWs(app);
 
 // CORS
 app.use((_req, res, next) => {
+  if (localOnly) {
+    const host = _req.headers.host;
+    const allowedHosts = [`localhost:${PORT}`, `127.0.0.1:${PORT}`];
+    if (!allowedHosts.includes(host) || (_req.headers.origin && !allowedHosts.some((value) => _req.headers.origin === `http://${value}`))) {
+      return res.status(403).json({ message: "Local origin required" });
+    }
+    return next();
+  }
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.header("Access-Control-Allow-Headers", "*");
@@ -128,6 +206,9 @@ app.get("/health", (_req, res) => {
 });
 
 app.get("/config", (_req, res) => {
+  if (localOnly) {
+    return res.json({ mode: "agent", authMethod: "azure_cli", authRequired: false, memoryEnabled, promptRoleTesting });
+  }
   res.json({
     mode: process.env.VOICELIVE_MODE || "model",
     model: process.env.VOICELIVE_MODEL || "gpt-realtime",
@@ -148,6 +229,55 @@ app.get("/config", (_req, res) => {
     authRequired: !allowAnonymous(),
   });
 });
+
+if (memoryEnabled) {
+  app.use("/memory", async (req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    try { req.memoryIdentity = await localIdentity(); req.memoryUserId = req.memoryIdentity.userId; next(); }
+    catch { res.status(401).json({ message: "Sign in with Azure CLI to access interview memory." }); }
+  });
+  app.get("/memory/projects", (req, res) => {
+    const projects = visibleProjects(req.memoryIdentity);
+    const selected = projects.find(project => project.id === req.query.projectId);
+    res.json({ projects, selectedProjectId: selected?.id || "", interviews: selected ? interviews.list(req.memoryUserId, selected.id) : [] });
+  });
+  app.post("/memory/projects", (req, res) => {
+    try { res.status(201).json(interviews.createProject(req.memoryUserId, req.body.name)); }
+    catch (error) { res.status(400).json({ message: error.message }); }
+  });
+  app.post("/memory/projects/:projectId/archive", (req, res) => {
+    try { res.json(interviews.archiveProject(req.memoryUserId, req.params.projectId)); }
+    catch (error) { res.status(error.message.startsWith("End all interviews") ? 409 : 403).json({ message: error.message }); }
+  });
+  app.get("/memory/projects/:projectId/interviews", (req, res) => {
+    try { authorizeProject(req.memoryIdentity, req.params.projectId); res.json({ interviews: interviews.list(req.memoryUserId, req.params.projectId) }); }
+    catch { res.status(403).json({ message: "Project access denied." }); }
+  });
+  app.post("/memory/projects/:projectId/retry", async (req, res) => {
+    try { authorizeProject(req.memoryIdentity, req.params.projectId); }
+    catch { return res.status(403).json({ message: "Project access denied." }); }
+    if (interviews.busy(req.memoryUserId, req.params.projectId)) return res.status(409).json({ message: "End the active interview before retrying memory." });
+    try { res.json(await getInterviewMemory().retry(req.memoryUserId, req.params.projectId)); }
+    catch (error) { res.status(503).json(memoryFailure(error)); }
+  });
+  app.get("/memory/projects/:projectId/interviews/:interviewId", (req, res) => {
+    try {
+      const context = { userId: req.memoryUserId, projectId: req.params.projectId, interviewId: req.params.interviewId };
+      authorizeProject(req.memoryIdentity, context.projectId);
+      const interview = interviews.get(context.userId, context.projectId, context.interviewId);
+      const transcript = interviews.transcript(context).map(({ item_id, role, content }) => ({ id: item_id, role, text: content, isFinal: true, historical: true }));
+      res.json({ interview, conversationIds: interviews.conversationIds(context), transcript });
+    } catch { res.status(403).json({ message: "Interview access denied." }); }
+  });
+  app.post("/memory/projects/:projectId/members", (req, res) => {
+    try {
+      authorizeProject(req.memoryIdentity, req.params.projectId);
+      if (typeof req.body.userId !== "string" || !/^[0-9a-f-]{36}:[0-9a-f-]{36}$/i.test(req.body.userId)) throw new Error("Expected a tenantId:objectId member identity.");
+      interviews.grantAccess(req.memoryUserId, req.params.projectId, req.body.userId);
+      res.sendStatus(204);
+    } catch (error) { res.status(403).json({ message: error.message }); }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Speech-to-text locale discovery (cached)
@@ -231,7 +361,11 @@ async function cleanupClient(clientId) {
 // ---------------------------------------------------------------------------
 
 app.ws("/ws/:clientId", (ws, req) => {
-  const clientId = req.params.clientId;
+  const clientId = localOnly ? randomUUID() : req.params.clientId;
+  if (localOnly && req.headers.origin !== `http://${req.headers.host}`) {
+    ws.close(WS_POLICY_VIOLATION, "Local origin required");
+    return;
+  }
   if (!isAuthenticated(req)) {
     console.warn(`[WS] Rejected unauthenticated WebSocket for ${clientId}`);
     ws.send(JSON.stringify({ type: "error", message: AUTH_REQUIRED_MESSAGE }));
@@ -251,12 +385,12 @@ app.ws("/ws/:clientId", (ws, req) => {
 
   ws.on("close", () => {
     console.log(`[WS] Client ${clientId} disconnected`);
-    cleanupClient(clientId);
+    cleanupClient(clientId).catch((error) => console.error("[MEMORY] Disconnect cleanup failed:", error.message));
   });
 
   ws.on("error", (err) => {
     console.error(`[WS] Error for ${clientId}:`, err);
-    cleanupClient(clientId);
+    cleanupClient(clientId).catch((error) => console.error("[MEMORY] Error cleanup failed:", error.message));
   });
 });
 
@@ -264,7 +398,7 @@ async function handleMessage(clientId, message, ws) {
   const msgType = message.type;
 
   if (msgType === "start_session") {
-    const config = { ...message };
+    const config = localOnly ? { proactive_greeting: false, project_id: message.project_id, interview_id: message.interview_id, initial_text: message.initial_text } : { ...message };
     delete config.type;
     await startSession(clientId, config, ws);
   } else if (msgType === "stop_session") {
@@ -274,7 +408,12 @@ async function handleMessage(clientId, message, ws) {
     if (handler) await handler.sendAudio(message.data || "");
   } else if (msgType === "send_text") {
     const handler = _handlers.get(clientId);
-    if (handler) await handler.sendText(message.text || "");
+    try {
+      if (!handler) throw new Error("Start a session before sending a message.");
+      await handler.sendText(message.text || "");
+    } catch (error) {
+      if (ws.readyState === 1) ws.send(JSON.stringify({ type: "chat_error", message: error.message }));
+    }
   } else if (msgType === "interrupt") {
     const handler = _handlers.get(clientId);
     if (handler) await handler.interrupt();
@@ -300,16 +439,41 @@ function sendToClient(ws, clientId) {
 }
 
 async function startSession(clientId, frontendConfig, ws) {
+  let memoryContext;
   try {
+    await cleanupClient(clientId);
     const endpoint = process.env.AZURE_VOICELIVE_ENDPOINT;
     if (!endpoint) throw new Error("Missing AZURE_VOICELIVE_ENDPOINT");
 
     const credential = getCredential();
     const send = sendToClient(ws, clientId);
     const agentRouting = resolveAgentRouting(clientId, frontendConfig);
+    if (memoryEnabled) {
+      const identity = await localIdentity();
+      if (ws.readyState !== 1) return;
+      const configured = authorizeProject(identity, frontendConfig.project_id);
+      if (configured) {
+        const role = projectRole(configured, identity);
+        const promptRoleTest = promptRoleTesting && Boolean(configured.requireRole) && !role;
+        if (!role && !promptRoleTest) throw new Error("Role-specific interviewing is disabled until Entra Stakeholder, HR, and Developer role claims are configured.");
+        memoryContext = interviews.open(identity.userId, frontendConfig.project_id, frontendConfig.interview_id);
+        Object.assign(memoryContext, {
+          memoryScope: configured.memoryScope,
+          projectName: configured.name,
+          role,
+          promptRoleTesting: promptRoleTest,
+        });
+      } else {
+        memoryContext = interviews.open(identity.userId, frontendConfig.project_id, frontendConfig.interview_id);
+      }
+    }
 
     // Build typed session config — frontend values override .env defaults
     const config = {
+      voiceOnly: localOnly,
+      initialText: typeof frontendConfig.initial_text === "string" ? frontendConfig.initial_text.trim() : "",
+      memorySession: memoryContext ? { coordinator: getInterviewMemory(), context: memoryContext } : undefined,
+      projectEndpoint: process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT,
       mode: frontendConfig.mode || process.env.VOICELIVE_MODE || "model",
       model: frontendConfig.model || process.env.VOICELIVE_MODEL || "gpt-realtime",
       voice:
@@ -358,10 +522,8 @@ async function startSession(clientId, frontendConfig, ws) {
       interimStaticTexts: frontendConfig.interim_static_texts || "",
     };
 
-    // Tear down any previous handler for this client
-    await cleanupClient(clientId);
-
-    const handler = new VoiceHandler(
+    const Handler = localOnly ? NativeVoiceHandler : VoiceHandler;
+    const handler = new Handler(
       clientId,
       endpoint,
       credential,
@@ -375,6 +537,7 @@ async function startSession(clientId, frontendConfig, ws) {
       `[APP] Session started for ${clientId} in ${config.mode} mode`
     );
   } catch (err) {
+    if (memoryContext) interviews.setStatus(memoryContext, "interrupted", "Session setup failed; retained data can be resumed.");
     console.error(`[APP] Failed to start session for ${clientId}:`, err);
     try {
       if (ws.readyState === 1) {
@@ -404,6 +567,7 @@ async function stopSession(clientId, ws) {
 // Static files — checked after API routes
 // ---------------------------------------------------------------------------
 const staticCandidates = [
+  ...(localOnly ? [join(__dirname, "local-ui")] : []),
   join(__dirname, "static"),
   join(__dirname, "..", "frontend", "dist"),
 ];
@@ -417,6 +581,10 @@ for (const candidate of staticCandidates) {
 }
 
 if (staticDir) {
+  if (localOnly) {
+    app.use(express.static(join(__dirname, "..", "frontend", "public")));
+    app.get("/lucide.js", (_req, res) => res.sendFile(join(__dirname, "node_modules", "lucide", "dist", "umd", "lucide.js")));
+  }
   app.use(express.static(staticDir));
   // SPA fallback — serve index.html for unmatched routes
   app.get("*", (_req, res) => {
@@ -448,6 +616,8 @@ process.on("SIGTERM", shutdown);
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.PORT || "8000", 10);
 
-app.listen(PORT, () => {
-  console.log(`[APP] Voice Live WebSocket server listening on port ${PORT}`);
+if (memoryEnabled) localUserId().catch(() => console.warn("[AUTH] Local identity warm-up failed; sign in with Azure CLI before loading interviews."));
+
+app.listen(PORT, localOnly ? "127.0.0.1" : "0.0.0.0", () => {
+  console.log(`[APP] Voice Live WebSocket server listening at http://localhost:${PORT}`);
 });

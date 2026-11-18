@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+    <title>Resource Planner | Voice &amp; Chat</title>
+    <link rel="stylesheet" href="/voice.css">
+    <script src="/lucide.js" defer></script>
+    <script src="/voice.js" type="module"></script>
+  </head>
+  <body>
+    <header><div class="brand"><i data-lucide="panels-top-left" aria-hidden="true"></i><span>Resource Planner</span></div><span class="local"><span></span> Local workspace</span></header>
+    <main>
+      <h1>Requirements interview</h1>
+      <section id="interview-controls" aria-label="Interview memory" hidden>
+        <div class="project-picker">
+          <label for="project">Project</label>
+          <select id="project" disabled aria-busy="true"><option value="">Loading projects...</option></select>
+          <button id="new-project" class="icon-button" type="button" title="New project" aria-label="New project"><i data-lucide="plus" aria-hidden="true"></i></button>
+          <button id="remove-project" class="icon-button" type="button" title="Remove project" aria-label="Remove project" disabled hidden><i data-lucide="trash-2" aria-hidden="true"></i></button>
+        </div>
+        <div class="interview-picker">
+          <label for="interview">Interview</label>
+          <select id="interview" disabled aria-busy="true"><option value="">Loading interviews...</option></select>
+        </div>
+        <button id="session-details-toggle" class="icon-button" type="button" title="Session details" aria-label="Session details" aria-expanded="false" aria-controls="session-details"><i data-lucide="ellipsis" aria-hidden="true"></i></button>
+        <p id="role-status" hidden></p>
+      </section>
+      <section id="session-details" aria-label="Session details" hidden>
+        <div class="details-heading"><h2>Session details</h2><button id="copy-conversation" class="icon-button" type="button" title="Copy Foundry conversation ID" aria-label="Copy Foundry conversation ID" disabled><i data-lucide="copy" aria-hidden="true"></i></button></div>
+        <span id="conversation-id">No conversation selected</span>
+        <p>Agent: resource-planner-voice-agent (latest published version per session)</p>
+        <p id="memory-diagnostic" hidden></p>
+        <p class="memory-notice">Interview text is saved on this device. Audio recording is off.</p>
+      </section>
+      <div id="memory-banner" class="memory-state" data-state="idle" hidden>
+        <i data-lucide="cloud-alert" aria-hidden="true"></i>
+        <div><strong id="memory-status" role="status">Cloud memory needs attention</strong><p id="memory-summary"></p></div>
+        <button id="retry-memory" type="button" title="Retry cloud memory sync"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>Retry sync</span></button>
+      </div>
+      <div class="voice-stage"><div class="visual"><canvas id="wave" width="800" height="240" aria-hidden="true"></canvas><i data-lucide="audio-lines" class="voice-mark" aria-hidden="true"></i></div>
+      <p id="status" role="status" aria-live="polite">Ready</p></div>
+      <section class="chat" aria-label="Conversation" hidden>
+        <h2>Conversation</h2>
+        <div id="messages" role="log" aria-live="polite" aria-label="Chat messages"></div>
+      </section>
+      <div class="conversation-dock">
+        <div class="session-toolbar">
+          <div class="mode-switch" role="group" aria-label="Conversation mode">
+            <button id="mode-audio" class="icon-button" type="button" aria-label="Audio mode" aria-pressed="true" title="Audio mode" data-tooltip="Audio mode"><i data-lucide="audio-lines" aria-hidden="true"></i></button>
+            <button id="mode-text" class="icon-button" type="button" aria-label="Text mode" aria-pressed="false" title="Text mode" data-tooltip="Text mode"><i data-lucide="type" aria-hidden="true"></i></button>
+          </div>
+          <div class="controls">
+            <button id="start" class="primary" title="Start voice session"><i data-lucide="mic" aria-hidden="true"></i><span>Start voice session</span></button>
+            <button id="mute" disabled title="Mute microphone" aria-pressed="false"><i data-lucide="mic-off" aria-hidden="true"></i><span>Mute</span></button>
+          </div>
+        </div>
+        <p id="chat-error" role="alert" hidden></p>
+        <form id="chat-form" hidden>
+          <textarea id="chat-input" aria-label="Message" placeholder="Message Resource Planner" maxlength="4000" rows="2"></textarea>
+          <button id="send" class="primary" type="submit" title="Send message" aria-label="Send message" disabled><i data-lucide="send" aria-hidden="true"></i></button>
+        </form>
+      </div>
+    </main>
+    <footer><span>MICROSOFT FOUNDRY</span><span id="connection">Disconnected</span></footer>
+    <dialog id="project-dialog">
+      <form id="project-form">
+        <h2>New project</h2>
+        <label for="project-name">Project name</label>
+        <input id="project-name" required maxlength="120" autocomplete="off">
+        <p id="project-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="cancel-project" type="button">Cancel</button><button type="submit" class="primary"><i data-lucide="plus" aria-hidden="true"></i>Create project</button></div>
+      </form>
+    </dialog>
+    <dialog id="remove-project-dialog" aria-labelledby="remove-project-title">
+      <form id="remove-project-form">
+        <h2 id="remove-project-title">Remove project?</h2>
+        <p id="remove-project-name"></p>
+        <p>This archives the project and removes it from the project list for all its members. Interview history and cloud memories are kept. No Foundry resources will be deleted.</p>
+        <p id="remove-project-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="cancel-remove-project" type="button">Cancel</button><button type="submit" class="danger"><i data-lucide="trash-2" aria-hidden="true"></i>Remove project</button></div>
+      </form>
+    </dialog>
+  </body>
+</html>

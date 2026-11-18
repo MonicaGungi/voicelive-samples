@@ -189,6 +189,12 @@ npm start
 
 Open **http://localhost:8000** in your browser.
 
+### Enterprise NOVA interview roles
+
+The JavaScript backend registers Enterprise NOVA from `javascript/projects.config.json`; it uses the existing Foundry memory scope `Enterprise-NOVA` and the existing SQLite interview store. The configured access group controls project visibility only. Starting an interview also requires exactly one Entra role mapping for `stakeholder`, `hr`, or `developer`.
+
+An Entra administrator must create or identify role-specific groups or app roles, then add their group object IDs to `roleGroupIds` or their exact `roles` claim values to `roleAppValues` in `javascript/projects.config.json`. Keep the arrays empty until those claims are configured; users without exactly one matching role see a blocked start state. For temporary local testing only, `VOICELIVE_PROMPT_ROLE_TESTING=true` lets the user name a perspective in their first request; it requires `VOICELIVE_LOCAL_ONLY=true`, binds to loopback, and must remain disabled in deployed/shared environments. Restart the backend after changing configuration. Requirements are discovered in the conversation, not hardcoded in app configuration. This setup does not modify the existing Foundry agent or its toolbox.
+
 ## Quick Start (C# / ASP.NET Core)
 
 ### 1. Build the frontend
