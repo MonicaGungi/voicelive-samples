@@ -332,7 +332,7 @@ function showChatMessage(message) {
     element = document.createElement('article');
     element.className = `message ${message.role === 'user' ? 'user' : 'assistant'}`;
     const label = document.createElement('strong');
-    label.textContent = message.role === 'user' ? 'You' : 'Resource Planner';
+    label.textContent = message.role === 'user' ? 'You' : 'Business Analyst';
     element.append(label, document.createElement('p'));
     messages.append(element);
     messageElements.set(message.id, element);
