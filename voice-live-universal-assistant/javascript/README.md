@@ -99,7 +99,9 @@ reply after the user turn, not merely a successful WebSocket handshake.
 ### Persistent Requirements Memory (Local Profile)
 
 The local profile resolves the highest active, published numeric version of the
-existing voice agent at the start of each session. Add `:VERSION` to
+existing voice agent at the start of each session. For an unpinned project with a
+knowledge mapping, it selects the highest version whose attached MCP tool matches
+that project. Add `:VERSION` to
 `AZURE_EXISTING_AGENT_ID` to pin a specific version. The agent's existing toolbox
 and skill remain unchanged. Memory uses the official Projects SDK's
 `beta.memoryStores.searchMemories` and `updateMemories` APIs against the existing
@@ -108,20 +110,48 @@ and skill remain unchanged. Memory uses the official Projects SDK's
 See [Microsoft's memory setup guide](https://learn.microsoft.com/azure/foundry/agents/how-to/memory-usage).
 
 Enterprise NOVA is added in the tracked [projects.config.json](projects.config.json),
-not by creating an agent or another project-list database. Its `memoryScope` is the
-exact existing `Enterprise-NOVA` scope. `accessGroupIds` requires membership in the
-existing `ResourcePlanner-Users` group. This authorization check is separate from
-the shared project memory scope. The existing SQLite database continues to hold
-local interview transcripts and conversation IDs.
+not by creating an agent or another project-list database. The application also
+discovers knowledge bases on the Search services referenced by the existing
+configuration. Every authenticated user in the configured tenant can see active
+projects. Discovered projects without a compatible knowledge binding are marked
+unavailable for interviews; they never fall back to another project's knowledge.
+Cloud memory is private:
+each user and project receives a `{project-id}-{employee-id}` scope. The server
+obtains the employee ID from Microsoft Graph using the authenticated user's
+delegated token, verifies that the Graph profile matches the signed-in tenant and
+user, and records the mapping in the existing local SQLite database. Employee IDs
+are visible in Foundry scope names and are not authorization credentials.
+
+This POC requires the Foundry memory store to be reserved exclusively for the
+configured Entra tenant. SQLite binds the short-scope registry to the first tenant,
+rejects duplicate or changed employee IDs among registered users, and rejects an
+unregistered short scope that already contains Foundry records. It cannot verify
+the entire directory's uniqueness or prevent another deployment from using the
+same Foundry store; administrators must enforce those policies. Employee IDs must
+start with a letter or digit and contain at most 16 ASCII letters, digits, hyphens,
+or underscores. The former shared `Enterprise-NOVA` scope
+is no longer read or written; its records are not deleted. The existing SQLite
+database continues to hold local interview transcripts and conversation IDs.
+
+New memories are written to the short scope. Previous `nova-v2-...` and
+`requirements-v1-...` private scopes are also searched for the same user and
+project, without copying or deleting old records. The `employee_memory_scopes`
+table stores tenant ID, user object ID, project ID, employee ID, scope, and
+optional first and last names for a future authorized administrator lookup. Names
+come only from validated Entra profile claims, can be missing, and never affect
+access or scope. The mapping is created when an authorized interview starts;
+historical users appear as they return. No administrator search endpoint is
+enabled. Protect the SQLite database with OS access controls and use a
+SQLite-aware backup to preserve mappings and legacy scope keys.
 
 Each session also receives bounded recent excerpts from other local interviews
 owned by the same authenticated user in the same project (up to 120 turns,
 12,000 serialized characters, and 2,000 characters per turn). These are separate
-from shared project memories and are not a complete interview archive. Other
+from cloud memories and are not a complete interview archive. Other
 users' private transcripts are excluded. Local continuity requires the same
 interview database; it remains available when cloud retrieval fails.
 
-Startup runs the three memory lookups concurrently and does not retry pending
+Startup runs the personal interview-memory lookups concurrently and does not retry pending
 cloud extraction before connecting. Unsynced local transcript excerpts remain
 available; cloud uploads still happen at turn checkpoints, session end, or manual
 retry. Connection time also includes agent lookup, authentication, and the saved
@@ -144,37 +174,106 @@ not deleted.
 Use the same server and interview database when testing continuity. Separate
 local servers can use different SQLite files even when their project names match.
 
+Shared project descriptions come from the selected project's configured knowledge
+MCP tool, not from personal chat-summary memory. The configured label and endpoint
+must match the saved voice agent's attached MCP tool; an unmapped or mismatched
+project is rejected before connecting to prevent cross-project knowledge exposure.
+Enterprise NOVA remains mapped to its existing Foundry IQ knowledge base.
+An MCP initialization failure is logged as `[KNOWLEDGE]`; check the Foundry
+connection and Azure AI Search permissions or networking if retrieval fails.
+
+#### Project Documents
+
+Users can create projects with the plus button and upload documents using the
+project documents button after an administrator configures the project's knowledge
+binding. The dialog shows the project ID when setup is incomplete. Project
+visibility is shared among authenticated users; interview transcripts and memory
+remain private to the signed-in user and project.
+
+For each user-created project, an administrator must preconfigure a separate
+Foundry IQ file knowledge source and knowledge base, and publish a version of the
+same voice agent that retains the existing discovery toolbox and skill and attaches
+only that knowledge base. Add the following entry to the optional
+`projectBindings` array in [projects.config.json](projects.config.json), then
+restart the local server. The values come from the actual project and Foundry
+configuration, not from project names:
+
+```json
+{
+  "projectId": "user-created-project-id",
+  "agentVersion": "19",
+  "knowledgeToolLabel": "project-knowledge",
+  "knowledgeToolEndpoint": "https://your-search.search.windows.net/knowledgebases/project-knowledge/mcp",
+  "knowledgeSource": "project-files"
+}
+```
+
+Each binding must use a distinct knowledge base and file source. Before uploads
+and interviews, the server verifies that the knowledge base contains only its
+configured file source and that existing configured projects do not use that
+source. It also checks the agent version's MCP endpoint before connecting. The
+administrator must restrict who can change Foundry knowledge-base definitions,
+agent versions, and the local configuration. Publishing a version changes the
+agent's latest version for other applications; this app selects the latest
+compatible version for unpinned configured projects. The app does not publish
+agent versions or create knowledge bases, sources, storage accounts, or model
+deployments.
+
+Uploads go directly to the configured Foundry IQ file knowledge source, using the
+backend's Azure CLI identity. Foundry indexes the file synchronously; the dialog
+reports success only after the service confirms it. Files are limited to 10 MB.
+Search permissions must allow the backend to inspect knowledge bases and upload
+files, and the existing Foundry connection identity must be able to retrieve the
+new knowledge base. A file source can use the existing embedding deployment if
+the administrator configures its model authentication; credentials from existing
+sources are not copied. A model-free, minimal file source is also supported by
+Foundry IQ. File source indexes and model calls can incur charges.
+
 For a greeting with an unknown role, the agent asks the role first. After the
 role reply, it briefly describes known project context and asks one expectations
 question, then uses the existing discovery skill for adaptive follow-ups. Earlier
 user contributions inform the question without being treated as new approvals.
 
-The current CLI token has no app roles and no Stakeholder, HR, or Developer groups.
-For temporary local testing, `VOICELIVE_PROMPT_ROLE_TESTING=true` allows the user to
-name one of those perspectives at any point in the conversation. This switch requires
-`VOICELIVE_LOCAL_ONLY=true`, binds the app to loopback, and does not change Entra
-claims. Turn it off after testing. For normal use, an admin must configure verified
-Entra group object IDs in `roleGroupIds` or exact app-role claim strings in
-`roleAppValues` in `projects.config.json`. For example:
+### Microsoft Entra sign-in and roles
 
-```json
-"roleGroupIds": {
-  "stakeholder": ["<Stakeholder Entra group object ID>"],
-  "hr": ["<HR Entra group object ID>"],
-  "developer": ["<Developer Entra group object ID>"]
-}
+With `VOICELIVE_ENTRA_AUTH=true`, users sign in in the browser. The backend verifies
+each access token's signature, tenant, audience, issuing client, delegated scope,
+and expiry before using `tid:oid` as the user ID. Interviews and cloud memory are
+keyed by that user and the selected project. The user declares an interview role
+in conversation; it is not an authorization claim. A new voice interview asks for
+the role aloud, while a resumed interview continues its existing conversation.
+Foundry calls still use the backend's
+Azure CLI credential; sign in with `az login` as before.
+
+App registration (single tenant):
+
+1. **Authentication**: add a **Single-page application** redirect URI
+  `http://localhost:8000/auth/redirect`. Open the app at `http://localhost:8000`,
+  not `127.0.0.1`.
+2. **Expose an API**: set the Application ID URI to `api://<client-id>` and add
+  a delegated scope named `access_as_user`.
+3. **API permissions**: add the app's own `access_as_user` permission and grant
+  consent. Add Microsoft Graph delegated **User.Read** and grant user or admin
+  consent according to tenant policy; the application calls `/me` to retrieve
+  the employee ID for the signed-in user.
+4. In **Enterprise applications**, check that **Assignment required?** is set to
+  **No**. Tenant consent policies or Conditional Access may still require admin
+  action. No application roles, groups claims, or individual assignments are
+  required by this application.
+
+Then set:
+
+```dotenv
+VOICELIVE_ENTRA_AUTH=true
+ENTRA_TENANT_ID=<tenant-id>
+ENTRA_CLIENT_ID=<application-client-id>
 ```
 
-Exactly one mapped role is required in normal use. In local prompt-role test mode,
-the agent reuses the latest perspective explicitly stated by this user in the
-same project, including earlier interviews. A current explicit role change takes
-precedence; it asks only if the role is missing or ambiguous. Shared project memory
-without user attribution and assistant guesses are not role evidence. This does
-not grant authorization or modify Entra claims.
-The role adds generic interview perspective and one-question-
-at-a-time guidance; Enterprise NOVA requirements come from the existing memory store,
-the agent, and its attached discovery skill. Restart the backend after changing the
-configuration.
+Roles are free-form interview context and do not grant project access or approval
+authority. Previous interviews remain available only to their owner within the same
+project. Existing private memory records remain in their original scopes; the former
+shared `Enterprise-NOVA` scope is preserved but not read in private-memory mode.
+Restart the backend after changing configuration.
 
 Required local environment settings:
 
@@ -301,7 +400,7 @@ foreach ($fixture in $fixtures) {
   $speech.Dispose()
 }
 node --env-file=.env --input-type=module -e "process.env.VOICELIVE_TEST_MEMORY='true'; await import('./memoryService.test.js');"
-```
+Startup runs the personal interview-memory lookups concurrently and does not retry pending
 
 Implementation files: `memoryService.js` owns scoped search/update and durable retry;
 `interviewStore.js` owns project authorization and interview records;

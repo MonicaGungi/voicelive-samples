@@ -35,15 +35,13 @@ let projectToRemove = '';
 let projectsLoading = true;
 let interviewsLoading = true;
 let interviewRequestId = 0;
+let auth = null;
 const messageElements = new Map();
 let current = null;
 let mode = 'audio';
 
 function updateControls() {
   const audio = mode === 'audio';
-  const selectedProjectOption = projectSelect.selectedOptions[0];
-  const roleTestMode = selectedProjectOption?.dataset.roleTestMode === 'true';
-  const roleMissing = selectedProjectOption?.dataset.roleRequired === 'true' && selectedProjectOption.dataset.roleConfigured !== 'true' && !roleTestMode;
   document.body.dataset.mode = mode;
   audioModeButton.setAttribute('aria-pressed', String(audio));
   textModeButton.setAttribute('aria-pressed', String(!audio));
@@ -63,15 +61,10 @@ function updateControls() {
   startButton.setAttribute('aria-pressed', String(voiceActive));
   startButton.classList.toggle('is-recording', voiceActive);
   const listsLoading = memoryEnabled && (projectsLoading || interviewsLoading);
-  startButton.disabled = listsLoading || roleMissing || removingProject || retryingMemory || !configurationReady || (memoryEnabled && !projectSelect.value) || Boolean(current && (!current.ready || current.stopping || !audio || current.microphonePending));
+  startButton.disabled = listsLoading || removingProject || retryingMemory || !configurationReady || (memoryEnabled && !projectSelect.value) || Boolean(current && (!current.ready || current.stopping || !audio || current.microphonePending));
   const selectionBlocked = Boolean(current && (!current.ready || current.stopping)) || retryingMemory || removingProject;
   projectSelect.disabled = projectsLoading || selectionBlocked;
   interviewSelect.disabled = projectsLoading || interviewsLoading || !projectSelect.value || selectionBlocked;
-  const roleStatus = document.querySelector('#role-status');
-  roleStatus.hidden = !roleMissing && !roleTestMode;
-  roleStatus.textContent = roleTestMode
-    ? 'Local role test mode: Stakeholder, HR, or Developer perspective for this conversation. This does not replace Entra role mapping.'
-    : roleMissing ? 'Entra role mapping is not configured for this project. Ask an admin to assign Stakeholder, HR, or Developer role claims.' : '';
   newProjectButton.disabled = projectsLoading || selectionBlocked;
   projectSelect.setAttribute('aria-busy', String(projectsLoading));
   interviewSelect.setAttribute('aria-busy', String(interviewsLoading));
@@ -108,16 +101,13 @@ async function selectMode(next) {
 }
 
 function updateComposer() {
-  const selected = projectSelect.selectedOptions[0];
-  const roleTestMode = selected?.dataset.roleTestMode === 'true';
-  const roleMissing = selected?.dataset.roleRequired === 'true' && selected.dataset.roleConfigured !== 'true' && !roleTestMode;
-  sendButton.disabled = (memoryEnabled && (projectsLoading || interviewsLoading)) || roleMissing || removingProject || retryingMemory || !configurationReady || (memoryEnabled && !projectSelect.value) || !chatInput.value.trim() || Boolean(current && (!current.ready || current.stopping || current.busy || current.pendingText));
+  sendButton.disabled = (memoryEnabled && (projectsLoading || interviewsLoading)) || removingProject || retryingMemory || !configurationReady || (memoryEnabled && !projectSelect.value) || !chatInput.value.trim() || Boolean(current && (!current.ready || current.stopping || current.busy || current.pendingText));
 }
 
 function setMemoryState(state, message = '') {
   memoryDiagnostic.textContent = message || { idle: 'Cloud memory not loaded', loaded: 'Project memory loaded', saved: 'Project memory synced' }[state] || state;
   memoryBanner.dataset.state = state;
-  memoryBanner.hidden = !['error', 'loading', 'saving'].includes(state);
+  memoryBanner.hidden = state !== 'error';
   retryMemoryButton.hidden = state !== 'error';
   if (state === 'error') {
     memoryStatus.textContent = 'Cloud memory needs attention';
@@ -131,8 +121,72 @@ function setMemoryState(state, message = '') {
   updateControls();
 }
 
-async function memoryRequest(path, options) {
-  const response = await fetch(path, options);
+async function signIn({ tenantId, clientId, apiScope }) {
+  const redirectUri = `${location.origin}/auth/redirect`;
+  const client = new window.msal.PublicClientApplication({
+    auth: { clientId, authority: `https://login.microsoftonline.com/${tenantId}`, redirectUri, postLogoutRedirectUri: redirectUri },
+    cache: { cacheLocation: 'sessionStorage' },
+  });
+  await client.initialize();
+  const result = await client.handleRedirectPromise();
+  const account = result?.account || client.getAllAccounts().find(item => item.tenantId === tenantId);
+  if (!account) {
+    status.textContent = 'Redirecting to Microsoft sign-in...';
+    await client.loginRedirect({ scopes: [apiScope], extraScopesToConsent: ['User.Read'] });
+    return null;
+  }
+  client.setActiveAccount(account);
+  try {
+    await client.acquireTokenSilent({ scopes: ['User.Read'], account });
+  } catch (error) {
+    if (error instanceof window.msal.InteractionRequiredAuthError) {
+      await client.acquireTokenRedirect({ scopes: ['User.Read'], account });
+      return null;
+    }
+    throw new Error('Unable to access your Microsoft Entra profile. Check Microsoft Graph User.Read consent.');
+  }
+  document.querySelector('#account-name').textContent = account.name || account.username;
+  document.querySelector('#account-name').hidden = false;
+  document.querySelector('#sign-out').hidden = false;
+  return { client, account, apiScope, idToken: result?.idToken || account.idToken || '', idTokenExpires: result?.idTokenClaims?.exp || account.idTokenClaims?.exp || 0 };
+}
+
+async function accessToken() {
+  if (!auth) return '';
+  try {
+    const result = await auth.client.acquireTokenSilent({ scopes: [auth.apiScope], account: auth.account });
+    if (result.idToken) {
+      auth.idToken = result.idToken;
+      auth.idTokenExpires = result.idTokenClaims?.exp || 0;
+    }
+    return result.accessToken;
+  } catch (error) {
+    if (error instanceof window.msal.InteractionRequiredAuthError) {
+      await auth.client.acquireTokenRedirect({ scopes: [auth.apiScope], account: auth.account });
+      throw new Error('Redirecting to Microsoft sign-in...');
+    }
+    throw new Error('Unable to renew your Microsoft sign-in. Refresh the page and try again.');
+  }
+}
+
+async function graphAccessToken() {
+  if (!auth) throw new Error('Microsoft Entra sign-in is required.');
+  try {
+    return (await auth.client.acquireTokenSilent({ scopes: ['User.Read'], account: auth.account })).accessToken;
+  } catch (error) {
+    if (error instanceof window.msal.InteractionRequiredAuthError) {
+      await auth.client.acquireTokenRedirect({ scopes: ['User.Read'], account: auth.account });
+      throw new Error('Redirecting to Microsoft sign-in...');
+    }
+    throw new Error('Unable to access your Microsoft Entra profile. Check Microsoft Graph User.Read consent.');
+  }
+}
+
+async function memoryRequest(path, options = {}) {
+  const headers = { ...options.headers };
+  if (auth) headers.Authorization = `Bearer ${await accessToken()}`;
+  if (auth && path.endsWith('/retry')) headers['X-Graph-Authorization'] = `Bearer ${await graphAccessToken()}`;
+  const response = await fetch(path, { ...options, headers });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || 'Interview request failed.');
   return result;
@@ -205,7 +259,7 @@ async function loadInterviewDetails() {
 }
 
 async function loadProjects(selected = '') {
-  const remembered = selected || localStorage.getItem('requirements-project') || '';
+  const remembered = selected;
   projectsLoading = interviewsLoading = true;
   ++interviewRequestId;
   projectSelect.replaceChildren(new Option('Loading projects...', ''));
@@ -213,6 +267,9 @@ async function loadProjects(selected = '') {
   updateControls();
   try {
     const result = await memoryRequest(`/memory/projects?projectId=${encodeURIComponent(remembered)}`);
+    const discoveryStatus = document.querySelector('#role-status');
+    discoveryStatus.textContent = result.discoveryWarning || '';
+    discoveryStatus.hidden = !result.discoveryWarning;
     projectSelect.replaceChildren(new Option('Select a project', ''));
     const nameCounts = new Map();
     for (const project of result.projects) {
@@ -221,12 +278,9 @@ async function loadProjects(selected = '') {
     }
     for (const project of result.projects) {
       const duplicate = nameCounts.get(project.name.trim().toLowerCase()) > 1;
-      const option = new Option(duplicate ? `${project.name} (${project.id.slice(0, 6)})` : project.name, project.id);
+      const displayName = duplicate ? `${project.name} (${project.id.slice(0, 6)})` : project.name;
+      const option = new Option(project.knowledgeConfigured ? displayName : `${displayName} (knowledge unavailable)`, project.id);
       option.dataset.owner = String(Boolean(project.isOwner));
-      option.dataset.role = project.role || '';
-      option.dataset.roleConfigured = String(Boolean(project.roleConfigured));
-      option.dataset.roleRequired = String(Boolean(project.roleRequired));
-      option.dataset.roleTestMode = String(Boolean(project.roleTestMode));
       projectSelect.append(option);
     }
     if (result.projects.some(project => project.id === remembered)) projectSelect.value = remembered;
@@ -255,6 +309,10 @@ async function initializeMemory() {
   status.textContent = 'Loading workspace...';
   try {
     const config = await memoryRequest('/config');
+    if (config.entraAuth) {
+      auth = await signIn(config.entraAuth);
+      if (!auth) return;
+    }
     memoryEnabled = Boolean(config.memoryEnabled);
     document.querySelector('#interview-controls').hidden = !memoryEnabled;
     if (memoryEnabled) await loadProjects();
@@ -425,14 +483,21 @@ async function startSession(pendingText = '') {
     session.playback.connect(session.context.destination);
     if (mode === 'audio') await enableMicrophone(session);
     if (current !== session) return;
+    const token = await accessToken();
+    const graphToken = await graphAccessToken();
+    if (current !== session) return;
     session.socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/${crypto.randomUUID()}`);
     session.initialTextSentByServer = memoryEnabled && Boolean(session.pendingText);
-    session.socket.onopen = () => send(session, {
-      type: 'start_session',
-      project_id: session.projectId,
-      interview_id: session.requestedInterviewId || undefined,
-      initial_text: session.initialTextSentByServer ? session.pendingText : undefined,
-    });
+    session.socket.onopen = () => {
+      if (token) send(session, { type: 'authenticate', access_token: token, graph_token: graphToken, id_token: auth?.idTokenExpires > Date.now() / 1000 ? auth.idToken : undefined });
+      send(session, {
+        type: 'start_session',
+        project_id: session.projectId,
+        interview_id: session.requestedInterviewId || undefined,
+        initial_text: session.initialTextSentByServer ? session.pendingText : undefined,
+        request_agent_turn: mode === 'audio' && !session.requestedInterviewId && !session.pendingText,
+      });
+    };
     session.socket.onmessage = ({ data }) => {
       if (current !== session) return;
       const message = JSON.parse(data);
@@ -538,6 +603,11 @@ chatInput.addEventListener('keydown', (event) => {
 });
 
 audioModeButton.addEventListener('click', () => selectMode('audio'));
+document.querySelector('#sign-out').addEventListener('click', async () => {
+  if (!auth) return;
+  await closeForSelectionChange();
+  await auth.client.logoutRedirect({ account: auth.account });
+});
 textModeButton.addEventListener('click', () => selectMode('text'));
 muteButton.addEventListener('click', () => { if (current) setMuted(current, !current.muted); });
 window.addEventListener('pagehide', () => { if (current) current.unloading = true; endSession(); });

@@ -1,0 +1,6 @@
+
+> voice-live-universal-assistant-js@1.0.0 start
+> node app.js
+
+[STATIC] Serving static files from C:\Users\MonicaGungi\OneDrive - Krish Services Group, Inc\Documents\KRISH 2026\voicelive-samples\voice-live-universal-assistant\javascript\local-ui
+[APP] Voice Live WebSocket server listening at http://localhost:8000

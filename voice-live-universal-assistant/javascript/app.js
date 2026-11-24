@@ -20,12 +20,16 @@ import { InterviewStore } from "./interviewStore.js";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { createLocalClaimsResolver } from "./localIdentity.js";
-import { loadProjectConfig, projectAccess, projectRole } from "./projectConfig.js";
+import { loadProjectBindings, loadProjectConfig, projectAccess } from "./projectConfig.js";
+import { ProjectKnowledge } from "./projectKnowledge.js";
+import { bearerToken, createEntraTokenVerifier, EntraAuthError, loadEntraConfig, resolveEmployeeIdentity } from "./entraAuth.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 configureLocalAgent(process.env);
 const localOnly = process.env.VOICELIVE_LOCAL_ONLY === "true";
-const promptRoleTesting = isPromptRoleTestingEnabled(process.env);
+const entraConfig = loadEntraConfig(process.env);
+const verifyEntraToken = entraConfig ? createEntraTokenVerifier(entraConfig) : null;
+const promptRoleTesting = !entraConfig && isPromptRoleTestingEnabled(process.env);
 const memoryEnabled = localOnly && process.env.VOICELIVE_MEMORY_ENABLED === "true";
 const interviewPath = process.env.VOICELIVE_INTERVIEW_DB || join(process.env.LOCALAPPDATA || join(homedir(), ".local", "share"), "VoiceLiveRequirements", `${createHash("sha256").update(process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT || "").digest("hex").slice(0, 20)}.sqlite`);
 const interviews = memoryEnabled ? new InterviewStore(interviewPath) : null;
@@ -33,6 +37,9 @@ let interviewMemory;
 let resolveLocalClaims;
 const configuredProjects = memoryEnabled ? loadProjectConfig() : [];
 const configuredProjectMap = new Map(configuredProjects.map(project => [project.id, project]));
+const projectBindings = memoryEnabled ? loadProjectBindings() : [];
+const projectBindingMap = new Map(projectBindings.map(binding => [binding.projectId, binding]));
+let discoveredProjectMap = new Map();
 
 async function localIdentity() {
   if (!memoryEnabled) throw new Error("Local memory is not enabled.");
@@ -44,42 +51,69 @@ async function localUserId() {
   return (await localIdentity()).userId;
 }
 
+function requestIdentity(token) {
+  return verifyEntraToken ? verifyEntraToken(token) : localIdentity();
+}
+
 function authorizeProject(identity, projectId) {
+  if (!identity?.userId) throw new Error("Project access denied.");
   const configured = configuredProjectMap.get(projectId);
   if (configured) {
-    if (!projectAccess(configured, identity)) throw new Error("Project access denied: your Entra groups are not authorized for this project.");
+    if (!projectAccess(configured, identity)) throw new Error("Project access denied.");
     interviews.registerConfiguredProject(configured.id, configured.name);
     interviews.addProjectMember(identity.userId, configured.id);
     return configured;
   }
+  interviews.joinActiveProjects(identity.userId);
   interviews.authorize(identity.userId, projectId);
-  return null;
+  const discovered = discoveredProjectMap.get(projectId);
+  if (discovered) return discovered;
+  const binding = projectBindingMap.get(projectId);
+  return binding ? { ...binding, name: interviews.projects(identity.userId).find(project => project.id === projectId)?.name } : null;
 }
 
-function visibleProjects(identity) {
+async function visibleProjects(identity) {
+  let discoveryWarning = "";
+  try {
+    const origins = [...new Set(configuredProjects.filter(project => project.knowledgeToolEndpoint).map(project => new URL(project.knowledgeToolEndpoint).origin))];
+    const bases = (await Promise.all(origins.map(origin => getProjectKnowledge().discover(origin)))).flat();
+    const configuredEndpoints = new Set(configuredProjects.filter(project => project.knowledgeToolEndpoint).map(project => project.knowledgeToolEndpoint.toLowerCase()));
+    discoveredProjectMap = new Map(bases.filter(base => !configuredEndpoints.has(base.knowledgeToolEndpoint.toLowerCase()) && !configuredProjectMap.has(base.id) && !projectBindingMap.has(base.id)).map(base => [base.id, { ...base, discovered: true }]));
+  } catch (error) {
+    discoveryWarning = "Knowledge base discovery is unavailable. Existing projects are still shown.";
+    console.warn("[KNOWLEDGE] Discovery failed:", error.message);
+  }
   for (const project of configuredProjects) {
     if (projectAccess(project, identity)) {
       interviews.registerConfiguredProject(project.id, project.name);
       interviews.addProjectMember(identity.userId, project.id);
     }
   }
-  return interviews.projects(identity.userId)
+  for (const project of discoveredProjectMap.values()) interviews.registerConfiguredProject(project.id, project.name);
+  interviews.joinActiveProjects(identity.userId);
+  const discoveredNames = new Set([...discoveredProjectMap.values()].map(project => project.name));
+  const projects = interviews.projects(identity.userId)
     .filter(project => !configuredProjectMap.has(project.id) || projectAccess(configuredProjectMap.get(project.id), identity))
+    // Hide entries registered under the former hashed ID of a knowledge base that is now listed by name.
+    .filter(project => discoveredProjectMap.has(project.id) || !(/^kb-[0-9a-f]{32}$/.test(project.id) && discoveredNames.has(project.name)))
     .map(project => {
-      const config = configuredProjectMap.get(project.id);
-      if (!config) return { ...project, role: null, roleConfigured: true, roleRequired: false };
-      const role = projectRole(config, identity);
-      const roleTestMode = promptRoleTesting && Boolean(config.requireRole) && !role;
-      return { ...project, role, roleConfigured: Boolean(role), roleRequired: Boolean(config.requireRole), roleTestMode };
+      return { ...project, knowledgeConfigured: configuredProjectMap.has(project.id) || projectBindingMap.has(project.id) || discoveredProjectMap.has(project.id), role: null, roleConfigured: true, roleRequired: false, roleTestMode: false };
     });
+  return { projects, discoveryWarning };
 }
 
 function getInterviewMemory() {
   if (!interviewMemory) {
     const client = new AIProjectClient(process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT, getCredential());
-    interviewMemory = new InterviewMemory(new FoundryMemory(client, process.env.AZURE_MEMORY_STORE_NAME || "requirements-memory"), interviews);
+    interviewMemory = new InterviewMemory(new FoundryMemory(client, process.env.AZURE_MEMORY_STORE_NAME || "requirements-memory", interviews), interviews);
   }
   return interviewMemory;
+}
+
+let projectKnowledge;
+function getProjectKnowledge() {
+  if (!projectKnowledge) projectKnowledge = new ProjectKnowledge(getCredential(), configuredProjects);
+  return projectKnowledge;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +241,8 @@ app.get("/health", (_req, res) => {
 
 app.get("/config", (_req, res) => {
   if (localOnly) {
-    return res.json({ mode: "agent", authMethod: "azure_cli", authRequired: false, memoryEnabled, promptRoleTesting });
+    const entraAuth = entraConfig ? { tenantId: entraConfig.tenantId, clientId: entraConfig.clientId, apiScope: entraConfig.apiScope } : null;
+    return res.json({ mode: "agent", authMethod: entraConfig ? "entra" : "azure_cli", authRequired: Boolean(entraConfig), entraAuth, memoryEnabled, promptRoleTesting });
   }
   res.json({
     mode: process.env.VOICELIVE_MODE || "model",
@@ -233,16 +268,38 @@ app.get("/config", (_req, res) => {
 if (memoryEnabled) {
   app.use("/memory", async (req, res, next) => {
     res.set("Cache-Control", "no-store");
-    try { req.memoryIdentity = await localIdentity(); req.memoryUserId = req.memoryIdentity.userId; next(); }
-    catch { res.status(401).json({ message: "Sign in with Azure CLI to access interview memory." }); }
+    try { req.memoryIdentity = await requestIdentity(bearerToken(req.headers.authorization)); req.memoryUserId = req.memoryIdentity.userId; next(); }
+    catch (error) { res.status(401).json({ message: error instanceof EntraAuthError ? error.message : "Sign in with Azure CLI to access interview memory." }); }
   });
-  app.get("/memory/projects", (req, res) => {
-    const projects = visibleProjects(req.memoryIdentity);
-    const selected = projects.find(project => project.id === req.query.projectId);
-    res.json({ projects, selectedProjectId: selected?.id || "", interviews: selected ? interviews.list(req.memoryUserId, selected.id) : [] });
+  app.get("/memory/projects", async (req, res) => {
+    try {
+      const { projects, discoveryWarning } = await visibleProjects(req.memoryIdentity);
+      const selected = projects.find(project => project.id === req.query.projectId);
+      res.json({ projects, discoveryWarning, selectedProjectId: selected?.id || "", interviews: selected ? interviews.list(req.memoryUserId, selected.id) : [] });
+    } catch (error) { res.status(503).json({ message: error.message }); }
   });
   app.post("/memory/projects", (req, res) => {
     try { res.status(201).json(interviews.createProject(req.memoryUserId, req.body.name)); }
+    catch (error) { res.status(400).json({ message: error.message }); }
+  });
+  app.get("/memory/projects/:projectId/documents", async (req, res) => {
+    try { authorizeProject(req.memoryIdentity, req.params.projectId); }
+    catch { return res.status(403).json({ message: "Project access denied." }); }
+    const binding = projectBindingMap.get(req.params.projectId);
+    if (!binding) return res.status(409).json({ message: "A project knowledge base and agent version must be configured before uploading documents." });
+    try { res.json({ documents: await getProjectKnowledge().list(binding) }); }
+    catch (error) { res.status(503).json({ message: error.message }); }
+  });
+  app.post("/memory/projects/:projectId/documents", (req, res, next) => {
+    try { authorizeProject(req.memoryIdentity, req.params.projectId); }
+    catch { return res.status(403).json({ message: "Project access denied." }); }
+    if (!projectBindingMap.has(req.params.projectId)) return res.status(409).json({ message: "A project knowledge base and agent version must be configured before uploading documents." });
+    express.raw({ type: "application/octet-stream", limit: "10mb" })(req, res, error => {
+      if (error) return res.status(error.status || 400).json({ message: "Document upload failed. The maximum file size is 10 MB." });
+      next();
+    });
+  }, async (req, res) => {
+    try { res.status(201).json(await getProjectKnowledge().upload(projectBindingMap.get(req.params.projectId), req.query.name, req.body)); }
     catch (error) { res.status(400).json({ message: error.message }); }
   });
   app.post("/memory/projects/:projectId/archive", (req, res) => {
@@ -257,6 +314,11 @@ if (memoryEnabled) {
     try { authorizeProject(req.memoryIdentity, req.params.projectId); }
     catch { return res.status(403).json({ message: "Project access denied." }); }
     if (interviews.busy(req.memoryUserId, req.params.projectId)) return res.status(409).json({ message: "End the active interview before retrying memory." });
+    try {
+      if (!entraConfig) throw new EntraAuthError("Microsoft Entra sign-in is required to retrieve your employee ID.");
+      const identity = await resolveEmployeeIdentity(req.memoryIdentity, bearerToken(req.headers["x-graph-authorization"]), entraConfig);
+      await getInterviewMemory().memory.bindEmployeeScope(identity, req.params.projectId);
+    } catch (error) { return res.status(403).json({ message: error.message }); }
     try { res.json(await getInterviewMemory().retry(req.memoryUserId, req.params.projectId)); }
     catch (error) { res.status(503).json(memoryFailure(error)); }
   });
@@ -373,17 +435,38 @@ app.ws("/ws/:clientId", (ws, req) => {
     return;
   }
   console.log(`[WS] Client ${clientId} connected`);
+  let authentication = null;
+  const authTimer = verifyEntraToken ? setTimeout(() => { if (!authentication) ws.close(WS_POLICY_VIOLATION, "Authentication required"); }, 15000) : null;
+  const rejectSocket = (message) => {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: "error", message }));
+    ws.close(WS_POLICY_VIOLATION, "Authentication required");
+  };
 
   ws.on("message", async (data) => {
     try {
       const message = JSON.parse(data.toString());
-      await handleMessage(clientId, message, ws);
+      let identity;
+      if (verifyEntraToken) {
+        if (message.type === "authenticate") {
+          if (authentication) return rejectSocket("This connection is already authenticated.");
+          // Assigned before awaiting so later messages wait for this verification.
+          authentication = verifyEntraToken(message.access_token, message.id_token)
+            .then(identity => resolveEmployeeIdentity(identity, message.graph_token, entraConfig));
+          try { await authentication; clearTimeout(authTimer); }
+          catch (error) { rejectSocket(error instanceof EntraAuthError ? error.message : "Sign-in failed."); }
+          return;
+        }
+        if (!authentication) return rejectSocket("Sign in with Microsoft Entra to continue.");
+        try { identity = await authentication; } catch { return; }
+      }
+      await handleMessage(clientId, message, ws, identity);
     } catch (err) {
       console.error(`[WS] Error handling message from ${clientId}:`, err);
     }
   });
 
   ws.on("close", () => {
+    clearTimeout(authTimer);
     console.log(`[WS] Client ${clientId} disconnected`);
     cleanupClient(clientId).catch((error) => console.error("[MEMORY] Disconnect cleanup failed:", error.message));
   });
@@ -394,13 +477,13 @@ app.ws("/ws/:clientId", (ws, req) => {
   });
 });
 
-async function handleMessage(clientId, message, ws) {
+async function handleMessage(clientId, message, ws, identity) {
   const msgType = message.type;
 
   if (msgType === "start_session") {
-    const config = localOnly ? { proactive_greeting: false, project_id: message.project_id, interview_id: message.interview_id, initial_text: message.initial_text } : { ...message };
+    const config = localOnly ? { proactive_greeting: false, project_id: message.project_id, interview_id: message.interview_id, initial_text: message.initial_text, request_agent_turn: message.request_agent_turn === true } : { ...message };
     delete config.type;
-    await startSession(clientId, config, ws);
+    await startSession(clientId, config, ws, identity);
   } else if (msgType === "stop_session") {
     await stopSession(clientId, ws);
   } else if (msgType === "audio_chunk") {
@@ -438,7 +521,7 @@ function sendToClient(ws, clientId) {
   };
 }
 
-async function startSession(clientId, frontendConfig, ws) {
+async function startSession(clientId, frontendConfig, ws, verifiedIdentity) {
   let memoryContext;
   try {
     await cleanupClient(clientId);
@@ -449,28 +532,31 @@ async function startSession(clientId, frontendConfig, ws) {
     const send = sendToClient(ws, clientId);
     const agentRouting = resolveAgentRouting(clientId, frontendConfig);
     if (memoryEnabled) {
-      const identity = await localIdentity();
+      const identity = verifiedIdentity;
+      if (!verifyEntraToken || !identity) throw new EntraAuthError("Microsoft Entra sign-in is required to retrieve your employee ID.");
       if (ws.readyState !== 1) return;
       const configured = authorizeProject(identity, frontendConfig.project_id);
+      const binding = projectBindingMap.get(frontendConfig.project_id);
+      if (binding) await getProjectKnowledge().verify(binding);
+      await getInterviewMemory().memory.bindEmployeeScope(identity, frontendConfig.project_id);
+      if (ws.readyState !== 1) return;
       if (configured) {
-        const role = projectRole(configured, identity);
-        const promptRoleTest = promptRoleTesting && Boolean(configured.requireRole) && !role;
-        if (!role && !promptRoleTest) throw new Error("Role-specific interviewing is disabled until Entra Stakeholder, HR, and Developer role claims are configured.");
         memoryContext = interviews.open(identity.userId, frontendConfig.project_id, frontendConfig.interview_id);
         Object.assign(memoryContext, {
-          memoryScope: configured.memoryScope,
           projectName: configured.name,
-          role,
-          promptRoleTesting: promptRoleTest,
+          knowledgeToolEndpoint: configured.knowledgeToolEndpoint,
+          firstName: identity.firstName || String(identity.name || "").trim().split(/\s+/)[0] || "",
         });
       } else {
         memoryContext = interviews.open(identity.userId, frontendConfig.project_id, frontendConfig.interview_id);
+        memoryContext.firstName = identity.firstName || String(identity.name || "").trim().split(/\s+/)[0] || "";
       }
     }
 
     // Build typed session config — frontend values override .env defaults
     const config = {
       voiceOnly: localOnly,
+      requestAgentTurn: memoryEnabled && frontendConfig.request_agent_turn === true && !frontendConfig.interview_id && !frontendConfig.initial_text,
       initialText: typeof frontendConfig.initial_text === "string" ? frontendConfig.initial_text.trim() : "",
       memorySession: memoryContext ? { coordinator: getInterviewMemory(), context: memoryContext } : undefined,
       projectEndpoint: process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT,
@@ -507,6 +593,7 @@ async function startSession(clientId, frontendConfig, ws) {
       agentName: agentRouting.agent_name,
       projectName: agentRouting.project,
       agentVersion: agentRouting.agent_version,
+      knowledge: memoryContext ? getProjectKnowledge() : undefined,
       conversationId: frontendConfig.conversation_id || "",
       foundryResourceOverride: agentRouting.foundry_resource_override,
       authIdentityClientId: agentRouting.auth_identity_client_id,
@@ -584,6 +671,12 @@ if (staticDir) {
   if (localOnly) {
     app.use(express.static(join(__dirname, "..", "frontend", "public")));
     app.get("/lucide.js", (_req, res) => res.sendFile(join(__dirname, "node_modules", "lucide", "dist", "umd", "lucide.js")));
+    app.get("/msal-browser.js", (_req, res) => res.sendFile(join(__dirname, "node_modules", "@azure", "msal-browser", "lib", "msal-browser.min.js")));
+    app.get("/msal-redirect-bridge.js", (_req, res) => res.sendFile(join(__dirname, "node_modules", "@azure", "msal-browser", "lib", "redirect-bridge", "msal-redirect-bridge.min.js")));
+    app.get("/auth/redirect", (_req, res) => {
+      res.set("Cache-Control", "no-store");
+      res.sendFile(join(__dirname, "local-ui", "auth-redirect.html"));
+    });
   }
   app.use(express.static(staticDir));
   // SPA fallback — serve index.html for unmatched routes
@@ -616,7 +709,7 @@ process.on("SIGTERM", shutdown);
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.PORT || "8000", 10);
 
-if (memoryEnabled) localUserId().catch(() => console.warn("[AUTH] Local identity warm-up failed; sign in with Azure CLI before loading interviews."));
+if (memoryEnabled && !entraConfig) localUserId().catch(() => console.warn("[AUTH] Local identity warm-up failed; sign in with Azure CLI before loading interviews."));
 
 app.listen(PORT, localOnly ? "127.0.0.1" : "0.0.0.0", () => {
   console.log(`[APP] Voice Live WebSocket server listening at http://localhost:${PORT}`);

@@ -1,0 +1,103 @@
+Knowledge Base: IT Helpdesk Knowledge
+
+Overview:
+The IT Helpdesk Knowledge Base provides technical support guidance, troubleshooting procedures, and service request information for employees and support teams. The objective is to reduce resolution times and enable users to solve common IT issues through self-service assistance.
+
+Supported Areas:
+
+1. Account and Access Management
+- Password reset procedures
+- Multi-Factor Authentication (MFA) setup
+- Account unlock requests
+- Role and permission requests
+- Single Sign-On (SSO) troubleshooting
+
+2. Microsoft 365 Support
+- Outlook email issues
+- Teams meeting and chat troubleshooting
+- OneDrive synchronization issues
+- SharePoint access requests
+- License and application support
+
+3. Hardware Support
+- Laptop setup and configuration
+- Desktop troubleshooting
+- Printer setup and issues
+- Peripheral device support
+- Hardware replacement requests
+
+4. Network and Connectivity
+- VPN connection troubleshooting
+- Wi-Fi connectivity issues
+- Network access support
+- Remote access guidance
+- Internet connectivity troubleshooting
+
+5. Software Support
+- Software installation requests
+- Application troubleshooting
+- Browser-related issues
+- Version upgrade guidance
+- Software license requests
+
+6. Security and Compliance
+- Phishing email reporting
+- Security incident reporting
+- Device security guidelines
+- Data protection policies
+- Secure remote-working practices
+
+7. Service Requests
+- New employee onboarding support
+- Employee offboarding support
+- Hardware requests
+- Software access requests
+- Service escalation procedures
+
+Common Troubleshooting Steps:
+
+Password Reset:
+1. Navigate to the password self-service portal.
+2. Verify identity using MFA.
+3. Create a new password following company policy.
+4. Sign in again using the updated credentials.
+
+VPN Connectivity Issues:
+1. Verify internet connectivity.
+2. Ensure VPN client is installed and updated.
+3. Confirm account permissions.
+4. Reconnect using approved VPN credentials.
+5. Contact IT Support if the issue persists.
+
+Outlook Not Sending Emails:
+1. Verify internet connection.
+2. Check mailbox quota.
+3. Restart Outlook.
+4. Confirm account settings.
+5. Recreate Outlook profile if required.
+
+Support Priority Levels:
+
+Priority 1:
+Critical business outage affecting multiple users.
+
+Priority 2:
+Major functionality impacted with no workaround.
+
+Priority 3:
+Single-user issue with workaround available.
+
+Priority 4:
+General requests, information inquiries, or low-impact issues.
+
+Support Channels:
+- IT Service Portal
+- Helpdesk Email
+- Microsoft Teams Support Channel
+- Service Desk Phone Support
+
+Project Status:
+Active Knowledge Base
+
+Important:
+All troubleshooting procedures and support processes are subject to organizational IT policies and may change as systems and technologies evolve.

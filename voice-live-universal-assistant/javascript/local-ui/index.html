@@ -6,10 +6,11 @@
     <title>Resource Planner | Voice &amp; Chat</title>
     <link rel="stylesheet" href="/voice.css">
     <script src="/lucide.js" defer></script>
+    <script src="/msal-browser.js" defer></script>
     <script src="/voice.js" type="module"></script>
   </head>
   <body>
-    <header><div class="brand"><i data-lucide="panels-top-left" aria-hidden="true"></i><span>Resource Planner</span></div><span class="local"><span></span> Local workspace</span></header>
+    <header><div class="brand"><i data-lucide="panels-top-left" aria-hidden="true"></i><span>Resource Planner</span></div><div class="account"><span id="account-name" hidden></span><button id="sign-out" type="button" hidden>Sign out</button><span class="local"><span></span> Local workspace</span></div></header>
     <main>
       <h1>Requirements interview</h1>
       <section id="interview-controls" aria-label="Interview memory" hidden>

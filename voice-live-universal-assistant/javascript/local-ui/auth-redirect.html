@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="referrer" content="no-referrer">
+    <title>Signing in...</title>
+    <script src="/msal-redirect-bridge.js"></script>
+  </head>
+  <body>
+    <p id="status">Completing sign-in...</p>
+    <script>
+      msalRedirectBridge.broadcastResponseToMainFrame().catch(() => {
+        document.querySelector('#status').textContent = 'Sign-in could not be completed. Close this window and try again.';
+      });
+    </script>
+  </body>
+</html>

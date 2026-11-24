@@ -1,0 +1,18 @@
+Project: Enterprise NOVA 
+
+Project Overview: 
+Enterprise NOVA is a centralized Employee Management and HR Operations Portal designed to streamline employee information, leave management, attendance tracking, and internal approval workflows.
+
+Business Objective: Replace manual processes involving emails, Excel spreadsheets, and disconnected systems with a unified employee self-service platform.
+
+Phase 1 - Key Modules
+: Employee Management – Employee profiles, department information, reporting hierarchy, and employee records. Leave Management – Leave applications, leave balances, manager approvals, and HR escalations. Attendance Management – Employee attendance, working hours, and holiday calendars. Approval Workflows – Manager approvals, escalations, and automated notifications. Reporting – Employee reports, leave history, attendance summaries, and HR dashboards. 
+
+User Roles: 
+Business Stakeholder: Defines business goals, priorities, and operational expectations. 
+HR Representative: Defines employee policies, leave rules, approval workflows, and compliance requirements. 
+Developer: Discusses architecture, integrations, APIs, security, and technical implementation. Initial 
+
+Business Requirements: Employees should be able to manage their profiles and submit leave requests. Managers should be able to approve or reject employee leave requests. HR should manage leave policies, balances, and exceptions. Employees should receive notifications about request status changes. Managers and HR should have access to relevant reports. 
+Project Status: Requirements Gathering / Discovery Phase. 
+Important: All listed requirements are preliminary and subject to stakeholder validation.

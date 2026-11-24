@@ -3,21 +3,8 @@
     {
       "id": "enterprise-nova",
       "name": "Enterprise NOVA",
-      "memoryScope": "Enterprise-NOVA",
-      "requireRole": true,
-      "accessGroupIds": [
-        "e490af10-dd7e-4cea-9ae6-a6a86773e990"
-      ],
-      "roleGroupIds": {
-        "stakeholder": [],
-        "hr": [],
-        "developer": []
-      },
-      "roleAppValues": {
-        "stakeholder": [],
-        "hr": [],
-        "developer": []
-      }
+      "knowledgeToolLabel": "kb-enterprise-nova-kno-iblcg",
+      "knowledgeToolEndpoint": "https://resource-planner-ai-search.search.windows.net/knowledgebases/enterprise-nova-knowledge/mcp"
     }
   ]
 }
