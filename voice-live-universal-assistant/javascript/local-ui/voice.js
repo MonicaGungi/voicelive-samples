@@ -411,7 +411,7 @@ function draw(session) {
   const samples = new Uint8Array(session.analyser.fftSize);
   session.analyser.getByteTimeDomainData(samples);
   drawing.clearRect(0, 0, canvas.width, canvas.height);
-  drawing.strokeStyle = session.muted ? '#a4ada8' : '#2c936f';
+  drawing.strokeStyle = session.muted ? '#a4ada8' : getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#0d0d0d';
   drawing.lineWidth = 2;
   drawing.beginPath();
   samples.forEach((value, index) => {
